@@ -29,3 +29,9 @@ core
 
 # macOS
 .DS_Store
+
+.devcontainer
+
+.idea
+
+.vscode
