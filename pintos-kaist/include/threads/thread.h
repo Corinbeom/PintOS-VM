@@ -128,6 +128,8 @@ struct thread {
 	int next_FD;					// 다음 사용 가능한 fd값
 	struct file *running_file;		// 현재 프로세스에서 실행 중인 파일
 
+	struct hash vm;					// 스테드의 가상 주소 공간을 관리하는 Hash 테이블
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */

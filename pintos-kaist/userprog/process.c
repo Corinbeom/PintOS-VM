@@ -439,6 +439,8 @@ void process_exit(void) {
 
     // 파일 디스크립터 테이블에 할당했던 메모리 해제
     palloc_free_multiple(cur->FDT, FDT_PAGES);
+	
+	/* TODO : page 삭제 로직 추가 */
 
     // 현재 실행 파일 닫기(deny_write 해제는 해당 함수 안에서 자동으로 적용)
     file_close(cur->running_file);
@@ -781,6 +783,8 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
+		/* TODO : Delete allocating and mapping physical page part */
+
 		/* Get a page of memory. */
 		uint8_t *kpage = palloc_get_page (PAL_USER);
 		if (kpage == NULL)
@@ -822,6 +826,9 @@ setup_stack (struct intr_frame *if_) {
 		else
 			palloc_free_page (kpage);
 	}
+	/* Create page */
+	/* Set up page members */
+	/* Using insert_vme(), add vm_enty to hash table */
 	return success;
 }
 
@@ -842,6 +849,10 @@ install_page (void *upage, void *kpage, bool writable) {
 	 * address, then map our page there. */
 	return (pml4_get_page (t->pml4, upage) == NULL
 			&& pml4_set_page (t->pml4, upage, kpage, writable));
+}
+
+bool handel_mm_fault(struct page &vme) {
+	/* TODO : */
 }
 #else
 /* From here, codes will be used after project 3.
