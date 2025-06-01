@@ -21,7 +21,7 @@ static const struct page_operations anon_ops = {
 void
 vm_anon_init (void) {
 	/* TODO: swap_disk를 설정하세요. */
-	swap_disk = NULL;
+	swap_disk = disk_get(1, 0);
 }
 
 /* 익명 페이지 매핑을 초기화합니다. */

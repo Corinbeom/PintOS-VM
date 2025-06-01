@@ -27,6 +27,7 @@ enum vm_type {
 #include "vm/uninit.h"
 #include "vm/anon.h"
 #include "vm/file.h"
+#include "lib/kernel/hash.h"
 #ifdef EFILESYS
 #include "filesys/page_cache.h"
 #endif
@@ -42,10 +43,12 @@ struct thread;
  * DO NOT REMOVE/MODIFY PREDEFINED MEMBER OF THIS STRUCTURE. */
 struct page {
 	const struct page_operations *operations;
-	void *va;              /* Address in terms of user space */
-	struct frame *frame;   /* Back reference for frame */
+	void *va;              // 가상 주소
+	struct frame *frame;   // 물리 프레임
 
 	/* Your implementation */
+	bool writable;
+	struct hash_elem hash_elem;
 
 	/* Per-type data are binded into the union.
 	 * Each function automatically detects the current union */
@@ -85,7 +88,7 @@ struct page_operations {
  * We don't want to force you to obey any specific design for this struct.
  * All designs up to you for this. */
 struct supplemental_page_table {
-	/* TODO : SPT 구현 */
+	struct hash spt_hash;
 };
 
 #include "threads/thread.h"
@@ -109,5 +112,8 @@ bool vm_alloc_page_with_initializer (enum vm_type type, void *upage,
 void vm_dealloc_page (struct page *page);
 bool vm_claim_page (void *va);
 enum vm_type page_get_type (struct page *page);
+
+unsigned page_hash(const struct hash_elem *p_, void *aux UNUSED);
+bool page_less(const struct hash_elem *a_, const struct hash_elem *b_, void *aux UNUSED);
 
 #endif  /* VM_VM_H */
