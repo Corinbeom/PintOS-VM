@@ -207,6 +207,7 @@ __do_fork(void *aux) {
 #ifdef VM
 	// 보조 페이지 테이블 초기화 및 복사 (VM 기능이 켜져 있는 경우)
 	supplemental_page_table_init(&current->spt);
+	supplemental_page_table_copy(&current->spt, &parent->spt);
 #else
 	// 단순 페이지 테이블 복사 (VM 기능이 꺼져 있는 경우)
 	if (!pml4_for_each(parent->pml4, duplicate_pte, parent))

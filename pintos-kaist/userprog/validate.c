@@ -5,6 +5,7 @@
 #include "threads/mmu.h"          /* PGSIZE */
 #include "threads/pte.h"          /* pml4_get_page() */
 #include <string.h>               /* memcpy */
+#include "userprog/syscall.h"
 
 /* 내부 헬퍼: 단일 가상 주소 uaddr이 
    - NULL이 아니고
@@ -12,9 +13,15 @@
    - 현재 프로세스의 페이지 테이블에 매핑되어 있는지 확인 */
 static bool
 check_page (const void *uaddr) {
-    return uaddr != NULL &&
-           is_user_vaddr(uaddr) &&
-           pml4_get_page (thread_current ()->pml4, uaddr) != NULL;
+    // return uaddr != NULL &&
+    //        is_user_vaddr(uaddr) &&
+    //        pml4_get_page (thread_current ()->pml4, uaddr) != NULL;
+    if (uaddr == NULL || !is_user_vaddr(uaddr))
+        return false;
+
+    void *va = pg_round_down(uaddr);
+    struct supplemental_page_table *spt = &thread_current()->spt;
+    return spt_find_page(spt, va) != NULL;
 }
 
 /* 사용자 포인터 uaddr로부터 size 바이트까지의 주소 범위를
