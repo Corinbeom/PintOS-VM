@@ -5,8 +5,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void validate_ptr (const void *uaddr, size_t size);
-void validate_str (const char *str);
+void validate_ptr (const void *uaddr, size_t size, bool write);
+void validate_str (const char *str, bool write);
 
 int64_t get_user (const uint8_t *uaddr);
 bool put_user (uint8_t *udst, uint8_t byte);

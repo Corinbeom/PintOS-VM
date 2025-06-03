@@ -72,6 +72,11 @@ void syscall_handler(struct intr_frame *f UNUSED) {
 	uint64_t arg5 = f->R.r8;
 	uint64_t arg6 = f->R.r9;
 
+#ifdef VM
+	// thread_current()->rsp = f->rsp;
+	thread_current()->rsp_snapshot = f->rsp;
+#endif
+
 	switch (syscall_num)
 	{
 	case SYS_HALT:
@@ -164,7 +169,7 @@ void sys_exit(int status)
 
 static tid_t sys_exec(const char *cmd_line) {
 	// 유효한 주소인지 검사
-	validate_str(cmd_line);
+	validate_str(cmd_line, false);
 
 	// 사용자로부터 받은 문자열(cmd_line)을 복사할 커널 영역의 페이지를 할당
 	// PAL_ZERO는 할당된 메모리를 0으로 초기화하라는 의미
@@ -201,7 +206,7 @@ tid_t sys_fork(const char *thread_name, struct intr_frame *f) {
 
 static bool sys_create(const char *file, unsigned initial_size) {
 	// 사용자 포인터가 유효한지 검사
-	validate_ptr(file, 1);
+	validate_ptr(file, 1, false);
 
 	// 유저 영역에 있는 파일 이름 문자열을 커널 영역의 안전한 버퍼로 복사
 	char kernel_buf[NAME_MAX + 1];  // 최대 이름 길이 + 널 문자 고려
@@ -242,7 +247,7 @@ static bool sys_create(const char *file, unsigned initial_size) {
 
 static bool sys_remove(const char *file) {
 	// 사용자 포인터가 유효한 사용자 영역 주소인지 검사
-	validate_ptr(file, 1);
+	validate_ptr(file, 1, false);
 
 	// NULL 포인터가 넘어온 경우 삭제 실패
 	if (file == NULL) {
@@ -255,7 +260,7 @@ static bool sys_remove(const char *file) {
 
 static int sys_open(const char *file_name) {
 	// 사용자 포인터가 유효한 사용자 영역 주소인지 검사
-	validate_ptr(file_name, 1);
+	validate_ptr(file_name, 1, false);
 
 	// 파일 시스템 접근을 위한 락 획득
 	lock_acquire(&filesys_lock);
@@ -314,7 +319,7 @@ static int sys_filesize(int fd) {
 
 static int sys_read(int fd, void *buffer, unsigned size) {
 	// 사용자 버퍼 포인터가 유효한지 확인
-	validate_ptr(buffer, size);
+	validate_ptr(buffer, size, true);
 
 	// 버퍼를 문자 단위로 접근하기 위해 char 포인터로 변환
 	char *ptr = (char *)buffer;
@@ -359,7 +364,7 @@ static int sys_read(int fd, void *buffer, unsigned size) {
 
 static int sys_write(int fd, const void *buffer, unsigned size) {
 	// 사용자 버퍼 포인터가 유효한지 확인
-	validate_ptr(buffer, size);
+	validate_ptr(buffer, size, false);
 
 	// stdin(0), stderr(2)은 출력 대상이 아니므로 에러 처리
 	if (fd == 0 || fd == 2) {

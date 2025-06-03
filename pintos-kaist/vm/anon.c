@@ -2,6 +2,7 @@
 
 #include "vm/vm.h"
 #include "devices/disk.h"
+#include "threads/vaddr.h"
 
 /* 이 아래 줄은 수정하지 마세요 */
 static struct disk *swap_disk;
@@ -37,6 +38,12 @@ anon_initializer (struct page *page, enum vm_type type, void *kva) {
 static bool
 anon_swap_in (struct page *page, void *kva) {
 	struct anon_page *anon_page = &page->anon;
+
+	// 우리가 swap-out 하지 않은 페이지는 memset으로 초기화하면 됨.
+	// 만약 anon_page->swap_slot != -1 이라면, 디스크에서 불러와야 함.
+	memset(kva, 0, PGSIZE);  // 초기 테스트를 위해 0으로 초기화
+
+	return true;  // 반드시 true 반환
 }
 
 /* 페이지 내용을 스왑 디스크에 저장하여 스왑 아웃합니다. */

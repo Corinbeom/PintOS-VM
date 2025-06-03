@@ -21,6 +21,7 @@
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
+#include "vm/file.h"
 #endif
 
 #define MAX_ARGS 128
@@ -239,6 +240,7 @@ __do_fork(void *aux) {
 	sema_up(&current->fork_sema);
 
 	// 자식 프로세스를 유저 모드로 전환 (ret-from-fork)
+	printf("[fork] child %s started, rsp=%p rip=%p\n", thread_name(), if_.rsp, if_.rip);
 	if (succ)
 		do_iret(&if_);
 
@@ -858,13 +860,6 @@ bool handel_mm_fault(struct page &vme) {
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
-struct load_info
-{
-	struct file *file;
-	off_t ofs;
-	uint32_t read_bytes;
-	uint32_t zero_bytes;
-};
 
 static bool
 lazy_load_segment (struct page *page, void *aux) {
@@ -882,9 +877,7 @@ lazy_load_segment (struct page *page, void *aux) {
 			return false;
 		}
 	}
-
 	memset(page->frame->kva + load_info->read_bytes, 0, load_info->zero_bytes);
-
 
 	return true;
 }

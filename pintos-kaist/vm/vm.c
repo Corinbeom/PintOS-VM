@@ -3,6 +3,7 @@
 #include "threads/malloc.h"
 #include "vm/vm.h"
 #include "vm/inspect.h"
+#include "vm/file.h"
 #include "lib/kernel/hash.h"
 #include "threads/mmu.h"
 
@@ -17,6 +18,7 @@ vm_init (void) {
 	register_inspect_intr ();
 	/* 이 위쪽은 수정하지 마세요 !! */
 	/* TODO: 이 아래쪽부터 코드를 추가하세요 */
+	list_init(&frame_table);
 }
 
 /* 페이지의 타입을 가져옵니다. 이 함수는 페이지가 초기화된 후 타입을 알고 싶을 때 유용합니다.
@@ -138,6 +140,10 @@ vm_get_frame (void) {
 	frame->kva = kva;
 	frame->page = NULL;
 
+	// get_frame 내부에서 frame 등록
+	list_push_back(&frame_table, &frame->frame_elem);
+
+
 	ASSERT (frame != NULL);
 	ASSERT (frame->page == NULL);
 	return frame;
@@ -148,6 +154,16 @@ static void
 vm_stack_growth (void *addr UNUSED) {
 	/* vm_try_handle_fault() 안에서
 		스택 확장 조건 만족 시 호출 */
+	void *page_va = pg_round_down(addr);
+	
+	bool alloc_success = vm_alloc_page_with_initializer(VM_ANON, page_va, true, NULL, NULL);
+	
+	if (!alloc_success)
+		printf("[FAIL] alloc_page failed at %p\n", page_va);
+
+	bool success = vm_claim_page(page_va);
+	
+	ASSERT(success);
 }
 
 /* 쓰기 보호된 페이지에서의 폴트를 처리합니다. */
@@ -155,37 +171,81 @@ static bool
 vm_handle_wp (struct page *page UNUSED) {
 }
 
-/* 성공 시 true를 반환합니다. */
+// /* 성공 시 true를 반환합니다. */
+// bool
+// vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
+// 		bool user UNUSED, bool write UNUSED, bool not_present UNUSED) {
+// 	struct supplemental_page_table *spt UNUSED = &thread_current ()->spt;
+// 	struct page *page = NULL;
+// 	/* TODO: 폴트를 검증하고 처리하세요. 
+// 	 * spt_find_page() → vm_claim_page()
+// 	 * → 유저 접근 여부, write 여부 등 확인
+// 	*/
+// 	/* TODO: 여기에 코드를 작성하세요 */
+// 	if (addr == NULL) {
+// 		return false;
+// 	}
+
+// 	if (is_kernel_vaddr(addr)) {
+// 		return false;
+// 	}
+
+// 	if (not_present) {
+// 	void *rsp = f->rsp;
+	
+// 	if (!user) {
+// 		rsp = thread_current()->rsp;
+// 	}
+
+// 	if (USER_STACK - (1 << 20) <= rsp - 8 && rsp - 8 == addr && addr <= USER_STACK) {
+// 		vm_stack_growth(addr);
+// 	}
+// 	else if (USER_STACK - (1 << 20) <= rsp && rsp <= addr && addr <= USER_STACK) {
+// 		vm_stack_growth(addr);
+// 	}
+
+// 	page = spt_find_page(spt, addr);
+// 	if (page == NULL) {
+// 		return false;
+// 	}
+// 	if (write && page->writable == 0) {
+// 		return false;
+// 	}
+
+// 	return vm_do_claim_page(page);
+// }
+
+// 	return false;
+// }
 bool
 vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
 		bool user UNUSED, bool write UNUSED, bool not_present UNUSED) {
-	struct supplemental_page_table *spt UNUSED = &thread_current ()->spt;
-	struct page *page = NULL;
-	/* TODO: 폴트를 검증하고 처리하세요. 
-	 * spt_find_page() → vm_claim_page()
-	 * → 유저 접근 여부, write 여부 등 확인
-	*/
-	/* TODO: 여기에 코드를 작성하세요 */
-	if (addr == NULL) {
-		return false;
-	}
+	struct supplemental_page_table *spt = &thread_current ()->spt;
 
-	if (is_kernel_vaddr(addr)) {
+	if (addr == NULL || is_kernel_vaddr(addr)) {
 		return false;
 	}
 
 	if (not_present) {
-		page = spt_find_page(spt, addr);
-		if (page == NULL) {
-			return false;
+		void *rsp = user ? f->rsp : thread_current()->rsp;
+
+		// 스택 확장 조건
+		if (addr >= rsp - 8 && addr < USER_STACK) {
+			vm_stack_growth(addr);
 		}
-		if (write == 1 && page->writable == 0) {
-			return false;
-		}
-		return vm_do_claim_page(page);
 	}
 
-	return false;
+	// 확장 이후든, 일반 페이지든 무조건 시도
+	struct page *page = spt_find_page(spt, addr);
+	if (page == NULL)
+		return false;
+
+	// 쓰기 접근인데 읽기 전용이면 실패
+	if (write && !page->writable)
+		return false;
+
+	// 실제 물리 메모리 확보
+	return vm_do_claim_page(page);
 }
 
 /* 페이지를 해제합니다. 이 함수는 수정하지 마세요. */
@@ -218,9 +278,16 @@ vm_do_claim_page (struct page *page) {
 	/* TODO: 페이지의 VA를 프레임의 PA에 매핑하기 위한 페이지 테이블 엔트리를 삽입하세요. */
 	struct thread *current = thread_current();
 
-	pml4_set_page(current->pml4, page->va, frame->kva, page->writable);
-	
-	return swap_in(page, frame->kva);
+	bool ok = pml4_set_page(current->pml4, page->va, frame->kva, page->writable);
+	if (!ok) {
+		return false;
+	}
+
+	bool sin = swap_in(page, frame->kva);
+	if (!sin) {
+		printf("[FAIL] swap_in failed\n");
+	}
+	return sin;
 }
 
 /* 새로운 보조 페이지 테이블을 초기화합니다. */
@@ -283,7 +350,7 @@ supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED, struct
 
 }
 
-void clear_page_hash(struct hash_elem *h, void *aux)
+void clear_hash_page(struct hash_elem *h, void *aux)
 {
 	struct page *page = hash_entry(h, struct page, hash_elem);
 	destroy(page);
@@ -295,5 +362,5 @@ void
 supplemental_page_table_kill (struct supplemental_page_table *spt UNUSED) {
 	/* TODO: 스레드가 가지고 있는 모든 보조 페이지 테이블을 제거하고
 	 * TODO: 수정된 내용을 저장소에 모두 반영(writeback)해야 합니다. */
-	hash_clear(&spt->spt_hash, clear_page_hash);
+	hash_clear(&spt->spt_hash, clear_hash_page);
 }

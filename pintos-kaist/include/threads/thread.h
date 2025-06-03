@@ -137,6 +137,10 @@ struct thread {
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
+	void *rsp;
+	/* 현재 스레드가 유저 스택 접근 시 저장해둔 rsp */
+	uint64_t rsp_snapshot;
+
 #endif
 
 	/* Owned by thread.c. */
