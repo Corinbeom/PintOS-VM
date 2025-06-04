@@ -15,6 +15,7 @@
 #include "filesys/directory.h"      // 디렉터리 관련 자료구조 및 함수 (디렉터리 열기, 탐색 등)
 #include "filesys/filesys.h"        // 파일 시스템 전반에 대한 함수 및 초기화/포맷 인터페이스
 #include "filesys/file.h"           // 개별 파일 객체(file 구조체) 및 파일 입출력 함수 정의 (read, write 등)
+#include "vm/file.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -34,6 +35,8 @@ static int sys_filesize(int fd);
 static int sys_read(int fd, void *buffer, unsigned size);
 static void sys_seek(int fd, unsigned position);
 static unsigned sys_tell(int fd);
+void sys_munmap(void *addr);
+void *sys_mmap(void *addr, size_t length, int writable, int fd, off_t offset);
 
 /* System call.
  *
@@ -73,8 +76,7 @@ void syscall_handler(struct intr_frame *f UNUSED) {
 	uint64_t arg6 = f->R.r9;
 
 #ifdef VM
-	// thread_current()->rsp = f->rsp;
-	thread_current()->rsp_snapshot = f->rsp;
+	thread_current()->rsp = f->rsp;
 #endif
 
 	switch (syscall_num)
@@ -121,7 +123,12 @@ void syscall_handler(struct intr_frame *f UNUSED) {
 	case SYS_TELL:
 		f->R.rax = sys_tell(arg1);
 		break;
-
+	case SYS_MMAP:
+        f->R.rax = sys_mmap(f->R.rdi, f->R.rsi, f->R.rdx, f->R.r10, f->R.r8);
+        break;
+	case SYS_MUNMAP:
+        sys_munmap(f->R.rdi);
+        break;
 	default:
 		thread_exit();
 		break;
@@ -424,4 +431,33 @@ static unsigned sys_tell(int fd)
 
 	// 현재 파일의 읽기/쓰기 위치(offset)를 반환
 	return file_tell(file);
+}
+
+void *sys_mmap(void *addr, size_t length, int writable, int fd, off_t offset)
+{
+    if (!addr || addr != pg_round_down(addr))
+        return NULL;
+
+    if (offset != pg_round_down(offset))
+        return NULL;
+
+    if (!is_user_vaddr(addr) || !is_user_vaddr(addr + length))
+        return NULL;
+
+    if (spt_find_page(&thread_current()->spt, addr))
+        return NULL;
+
+    struct file *f = process_get_file(fd);
+    if (f == NULL)
+        return NULL;
+
+    if (file_length(f) == 0 || (int)length <= 0)
+        return NULL;
+
+    return do_mmap(addr, length, writable, f, offset); // 파일이 매핑된 가상 주소 반환
+}
+
+void sys_munmap(void *addr)
+{
+    do_munmap(addr);
 }

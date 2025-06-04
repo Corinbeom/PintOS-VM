@@ -19,6 +19,7 @@
 #include "threads/vaddr.h"
 #include "vm/vm.h"
 #include "intrinsic.h"
+#include "userprog/syscall.h"
 #ifdef VM
 #include "vm/vm.h"
 #include "vm/file.h"
@@ -209,6 +210,7 @@ __do_fork(void *aux) {
 	// 보조 페이지 테이블 초기화 및 복사 (VM 기능이 켜져 있는 경우)
 	supplemental_page_table_init(&current->spt);
 	supplemental_page_table_copy(&current->spt, &parent->spt);
+		
 #else
 	// 단순 페이지 테이블 복사 (VM 기능이 꺼져 있는 경우)
 	if (!pml4_for_each(parent->pml4, duplicate_pte, parent))
@@ -240,7 +242,6 @@ __do_fork(void *aux) {
 	sema_up(&current->fork_sema);
 
 	// 자식 프로세스를 유저 모드로 전환 (ret-from-fork)
-	printf("[fork] child %s started, rsp=%p rip=%p\n", thread_name(), if_.rsp, if_.rip);
 	if (succ)
 		do_iret(&if_);
 
@@ -284,8 +285,9 @@ int process_exec(void *f_name)
 	ASSERT(argv[0] != NULL);
 
 	// 실행할 유저 프로그램을 메모리에 로드 (ELF 파일 분석 및 페이지 할당 포함)
+	lock_acquire(&filesys_lock);
 	success = load(argv[0], &_if);
-
+	lock_release(&filesys_lock);
 	/* 실행 파일 로드에 실패했으면 f_name 해제, -1 리턴 후 종료 */
 	if (!success) {
     	palloc_free_page(f_name);
@@ -648,7 +650,9 @@ load (const char *file_name, struct intr_frame *if_) {
 				break;
 		}
 	}
-
+	t->running_file = file;		// 스레드의 running_file을 현재 파일로 설정
+	
+	file_deny_write(file);		// 현재 실행 중인 파일 쓰기 금지
 	/* Set up stack. */
 	if (!setup_stack (if_))
 		goto done;
@@ -657,8 +661,6 @@ load (const char *file_name, struct intr_frame *if_) {
 	if_->rip = ehdr.e_entry;
 
 	success = true;
-	file_deny_write(file);		// 현재 실행 중인 파일 쓰기 금지
-	t->running_file = file;		// 스레드의 running_file을 현재 파일로 설정
 	goto done;
 done:
 	if (!success && file != NULL)
@@ -708,44 +710,6 @@ validate_segment (const struct Phdr *phdr, struct file *file) {
 
 	/* It's okay. */
 	return true;
-}
-
-int process_add_file(struct file *file) {
-    // 현재 실행 중인 스레드(=프로세스) 가져오기
-    struct thread *curr = thread_current();
-
-    // 파일 디스크립터(fd)는 0~2는 이미 예약된 상태(stdin, stdout, stderr)
-    // 따라서 일반 파일은 3번부터 사용
-    for (int fd = 3; fd < MAX_FD; fd++) {
-        // 현재 FDT(File Descriptor Table)에서 비어있는 슬롯 찾기
-        if (curr->FDT[fd] == NULL) {
-            // 비어 있는 슬롯을 찾으면 해당 위치에 파일 포인터 저장
-            curr->FDT[fd] = file;
-
-            // 다음 검색할 fd 번호를 갱신
-            curr->next_FD = fd + 1;
-
-            // 성공적으로 등록한 fd 번호 반환
-            return fd;
-        }
-    }
-
-    // 모든 슬롯이 차서 더 이상 파일을 열 수 없다면 -1 반환
-    return -1;
-}
-
-struct file *process_get_file(int fd) {
-    // 현재 실행 중인 스레드(=프로세스) 가져오기
-    struct thread *curr = thread_current();
-
-    // fd가 0~2(stdin, stdout, stderr)인 경우 시스템 콜에서 따로 처리
-    // 또한, 허용되지 않는 범위의 fd인 경우도 NULL 반환
-    if (fd < 3 || fd >= MAX_FD) {
-        return NULL;  // 유효하지 않은 fd → 실패
-    }
-
-    // 유효한 fd이면, 해당 위치의 파일 포인터를 반환
-    return curr->FDT[fd];
 }
 
 #ifndef VM
@@ -853,31 +817,30 @@ install_page (void *upage, void *kpage, bool writable) {
 			&& pml4_set_page (t->pml4, upage, kpage, writable));
 }
 
-bool handel_mm_fault(struct page &vme) {
-	/* TODO : */
-}
 #else
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
 
-static bool
-lazy_load_segment (struct page *page, void *aux) {
+bool lazy_load_segment(struct page *page, void *aux)
+{
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+
 	struct load_info *load_info = (struct load_info *)aux;
 
-	if (load_info->read_bytes > 0) {
-		file_seek(load_info->file, load_info->ofs);
-
-		if (file_read(load_info->file, page->frame->kva, load_info->read_bytes) 
-		    != (int)(load_info->read_bytes)) {
-			palloc_free_page(page->frame->kva);
-			return false;
-		}
+	// 1) 파일의 position을 ofs으로 지정한다.
+	file_seek(load_info->file, load_info->ofs);
+	// 2) 파일을 read_bytes만큼 물리 프레임에 읽어 들인다.
+	if (file_read(load_info->file, page->frame->kva, load_info->read_bytes) != (int)(load_info->read_bytes))
+	{
+		palloc_free_page(page->frame->kva);
+		return false;
 	}
+	// 3) 다 읽은 지점부터 zero_bytes만큼 0으로 채운다.
 	memset(page->frame->kva + load_info->read_bytes, 0, load_info->zero_bytes);
+	// free(load_info); // 🚨 Todo : 어디서 반환하지?
 
 	return true;
 }
@@ -914,12 +877,12 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-		/* TODO: Set up aux to pass information to the lazy_load_segment. */
+		/* TODO: Set up aux to pass information to the load_infosegment. */
 		// vm_alloc_page_with_initializer에 제공할 aux 인수로 필요한 보조 값들을 설정해야 합니다.
 		// 바이너리 로딩(loading of binary)을 위해 필요한 정보를 포함하는 구조체를 만들어야 할 수도 있습니다.
 		// void *aux = NULL;
 		struct load_info *load_info = (struct load_info *)malloc(sizeof(struct load_info));
-		load_info->file = file_duplicate(file);
+		load_info->file = file;
 		load_info->ofs = ofs;
 		load_info->read_bytes = page_read_bytes;
 		load_info->zero_bytes = page_zero_bytes;
@@ -963,3 +926,42 @@ setup_stack (struct intr_frame *if_) {
 	return success;
 }
 #endif /* VM */
+
+int process_add_file(struct file *file) {
+    // 현재 실행 중인 스레드(=프로세스) 가져오기
+    struct thread *curr = thread_current();
+
+    // 파일 디스크립터(fd)는 0~2는 이미 예약된 상태(stdin, stdout, stderr)
+    // 따라서 일반 파일은 3번부터 사용
+    for (int fd = 3; fd < MAX_FD; fd++) {
+        // 현재 FDT(File Descriptor Table)에서 비어있는 슬롯 찾기
+        if (curr->FDT[fd] == NULL) {
+            // 비어 있는 슬롯을 찾으면 해당 위치에 파일 포인터 저장
+            curr->FDT[fd] = file;
+
+            // 다음 검색할 fd 번호를 갱신
+            curr->next_FD = fd + 1;
+
+            // 성공적으로 등록한 fd 번호 반환
+            return fd;
+        }
+    }
+
+    // 모든 슬롯이 차서 더 이상 파일을 열 수 없다면 -1 반환
+    return -1;
+}
+
+struct file *process_get_file(int fd) {
+    // 현재 실행 중인 스레드(=프로세스) 가져오기
+    struct thread *curr = thread_current();
+
+    // fd가 0~2(stdin, stdout, stderr)인 경우 시스템 콜에서 따로 처리
+    // 또한, 허용되지 않는 범위의 fd인 경우도 NULL 반환
+    if (fd < 3 || fd >= MAX_FD) {
+        return NULL;  // 유효하지 않은 fd → 실패
+    }
+
+    // 유효한 fd이면, 해당 위치의 파일 포인터를 반환
+    return curr->FDT[fd];
+}
+

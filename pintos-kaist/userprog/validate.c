@@ -33,7 +33,7 @@ check_page(const void *uaddr, bool write) {
     if (page == NULL) {
         // 스택 성장 조건 만족 여부는 vm_try_handle_fault 내부에서 판단
         struct intr_frame fake_if;
-        fake_if.rsp = thread_current()->rsp_snapshot;  // 따로 저장해둔 rsp 값 필요
+        fake_if.rsp = thread_current()->rsp;  // 따로 저장해둔 rsp 값 필요
         bool ok = vm_try_handle_fault(&fake_if, va, true, write, true);
         if (!ok) return false;
         page = spt_find_page(spt, va);

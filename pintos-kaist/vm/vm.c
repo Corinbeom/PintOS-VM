@@ -332,6 +332,23 @@ supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED, struct
 			continue;
 		}
 
+		if (type == VM_FILE)
+        {
+            struct load_info *file_aux = malloc(sizeof(struct load_info));
+            file_aux->file = file_duplicate(src_page->file.file);
+            file_aux->ofs = src_page->file.ofs;
+            file_aux->read_bytes = src_page->file.read_bytes;
+            file_aux->zero_bytes = src_page->file.zero_bytes;
+            if (!vm_alloc_page_with_initializer(type, upage, writable, NULL, file_aux))
+                return false;
+            struct page *file_page = spt_find_page(dst, upage);
+            file_backed_initializer(file_page, type, NULL);
+            
+
+            pml4_set_page(thread_current()->pml4, file_page->va, src_page->frame->kva, src_page->writable);
+            continue;
+        }
+
 		/* 2) type이 uninit이 아니면 */
 		if (!vm_alloc_page_with_initializer(type, upage, writable, NULL, NULL)) // uninit page 생성 & 초기화
 			// init(lazy_load_segment)는 page_fault가 발생할때 호출됨
