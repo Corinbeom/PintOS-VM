@@ -6,6 +6,7 @@
 #include "userprog/syscall.h"
 #include "vm/vm.h"
 #include "vm/inspect.h"
+#include "vm/anon.h"
 #include "vm/file.h"
 
 /* Initializes the virtual memory subsystem by invoking each subsystem's
@@ -74,6 +75,7 @@ bool vm_alloc_page_with_initializer(enum vm_type type, void *upage, bool writabl
 		 * TODO: should modify the field after calling the uninit_new. */
 		struct page *newpage = calloc(1, sizeof(struct page));
 		uninit_new(newpage, upage, init, type, aux, page_initializer);
+		newpage->pml4 = thread_current()->pml4;
 		newpage->writable = writable;
 
 		/* TODO: Insert the page into the spt. */
@@ -323,7 +325,14 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst UNUSED,
 			vm_alloc_page_with_initializer(page->operations->type, page->va, page->writable, NULL, NULL);
 			vm_claim_page(page->va);
 			newpage = spt_find_page(dst, page->va);
-			memcpy(newpage->frame->kva, page->frame->kva, PGSIZE);
+			newpage->pml4 = thread_current()->pml4;
+			if (page->frame == NULL)
+			{
+				for (int i = 0; i < SLOT_SIZE; i++)
+					disk_read(swap_disk, page->anon.slot->start_sector + i, newpage->frame->kva + DISK_SECTOR_SIZE * i);
+			}
+			else
+				memcpy(newpage->frame->kva, page->frame->kva, PGSIZE);
 			break;
 		case VM_FILE:
 			newpage = malloc(sizeof(struct page));
@@ -332,14 +341,23 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst UNUSED,
 			newpage->writable = page->writable;
 			newpage->operations = page->operations;
 			spt_insert_page(&thread_current()->spt, newpage);
-			newpage->frame = page->frame;
-			newpage->frame->cnt_page += 1;
 			newpage->file.file = file_duplicate(page->file.file);
 			newpage->file.file_length = page->file.file_length;
 			newpage->file.ofs = page->file.ofs;
 			newpage->file.read_bytes = page->file.read_bytes;
 			newpage->file.zero_bytes = page->file.zero_bytes;
-			pml4_set_page(thread_current()->pml4, newpage->va, page->frame->kva, page->writable);
+			if (page->frame == NULL)
+			{
+				newpage->frame = NULL;
+				list_push_back(&page->file.file_list, &newpage->out_elem);
+			}
+			else
+			{
+				newpage->frame = page->frame;
+				list_push_back(&page->frame->page_list, &newpage->out_elem);
+				newpage->frame->cnt_page += 1;
+				pml4_set_page(thread_current()->pml4, newpage->va, page->frame->kva, page->writable);
+			}
 			break;
 		}
 	}

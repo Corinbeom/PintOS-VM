@@ -83,6 +83,7 @@ file_backed_swap_out(struct page *page)
 			file_write_at(out_page->file.file, out_page->frame->kva, out_page->file.read_bytes, out_page->file.ofs);
 		list_push_back(file_list, &out_page->out_elem);
 		pml4_clear_page(out_page->pml4, out_page->va);
+		out_page->frame = NULL;
 	}
 	if (!is_lock_held)
 		lock_release(&filesys_lock);
@@ -94,19 +95,36 @@ static void
 file_backed_destroy(struct page *page)
 {
 	struct file_page *file_page UNUSED = &page->file;
-	page->frame->cnt_page -= 1;
 	bool is_lock_held = lock_held_by_current_thread(&filesys_lock);
-	if (!is_lock_held)
-		lock_acquire(&filesys_lock);
-	if (pml4_is_dirty(thread_current()->pml4, page->va))
+	list_remove(&page->out_elem);
+	if (page->frame == NULL)
 	{
-		file_write_at(page->file.file, page->frame->kva, page->file.read_bytes, page->file.ofs);
+		if (!is_lock_held)
+			lock_acquire(&filesys_lock);
+		file_close(page->file.file);
+		if (!is_lock_held)
+			lock_release(&filesys_lock);
 	}
-	file_close(page->file.file);
-	if (!is_lock_held)
-		lock_release(&filesys_lock);
-	if (page->frame->cnt_page > 0)
-		pml4_clear_page(thread_current()->pml4, page->va);
+	else
+	{
+		page->frame->cnt_page -= 1;
+		if (!is_lock_held)
+			lock_acquire(&filesys_lock);
+		if (pml4_is_dirty(thread_current()->pml4, page->va))
+		{
+			file_write_at(page->file.file, page->frame->kva, page->file.read_bytes, page->file.ofs);
+		}
+		file_close(page->file.file);
+		if (!is_lock_held)
+			lock_release(&filesys_lock);
+		if (page->frame->cnt_page > 0)
+			pml4_clear_page(thread_current()->pml4, page->va);
+		else
+		{
+			list_remove(&page->frame->frame_elem);
+			free(page->frame);
+		}
+	}
 }
 
 static bool lazy_load(struct page *page, void *aux_)
@@ -191,6 +209,11 @@ void do_munmap(void *addr)
 	for (int i = 0; i < cnt_page; i++)
 	{
 		page = spt_find_page(&thread_current()->spt, addr + i * PGSIZE);
+		if (VM_TYPE(page->operations->type) == VM_FILE && page->frame == NULL)
+		{
+			list_remove(&page->out_elem);
+			continue;
+		}
 		if (pml4_is_dirty(thread_current()->pml4, page->va))
 		{
 			file_write_at(page->file.file, page->va, page->file.read_bytes, page->file.ofs);
@@ -198,6 +221,7 @@ void do_munmap(void *addr)
 		page->frame->cnt_page -= 1;
 		file_close(page->file.file);
 		hash_delete(&thread_current()->spt.spt_hash, &page->page_elem);
+		list_remove(&page->out_elem);
 		pml4_clear_page(thread_current()->pml4, page->va);
 	}
 	if (!is_lock_held)

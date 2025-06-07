@@ -8,6 +8,7 @@
 struct page;
 enum vm_type;
 
+struct disk *swap_disk;
 struct anon_page
 {
     void *aux;

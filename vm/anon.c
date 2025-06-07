@@ -5,7 +5,6 @@
 #include "devices/disk.h"
 
 /* DO NOT MODIFY BELOW LINE */
-static struct disk *swap_disk;
 static struct list swap_slot_list;
 static struct lock swap_lock;
 static char *zero_set[PGSIZE];
@@ -67,7 +66,7 @@ anon_swap_in(struct page *page, void *kva)
 		{
 			for (int i = 0; i < SLOT_SIZE; i++)
 			{
-				disk_read(swap_disk, in_page->anon.slot->start_sector + i, in_page->va + DISK_SECTOR_SIZE * i);
+				disk_read(swap_disk, in_page->anon.slot->start_sector + i, in_page->frame->kva + DISK_SECTOR_SIZE * i);
 				disk_write(swap_disk, in_page->anon.slot->start_sector + i, zero_set + DISK_SECTOR_SIZE * i);
 			}
 		}
@@ -98,6 +97,7 @@ anon_swap_out(struct page *page)
 			disk_write(swap_disk, out_page->anon.slot->start_sector + i, out_page->va + DISK_SECTOR_SIZE * i);
 		}
 		pml4_clear_page(out_page->pml4, out_page->va);
+		out_page->frame = NULL;
 	}
 	return true;
 }
@@ -107,5 +107,16 @@ static void
 anon_destroy(struct page *page)
 {
 	struct anon_page *anon_page = &page->anon;
-	page->frame->cnt_page -= 1;
+	list_remove(&page->out_elem);
+	if (page->frame != NULL)
+	{
+		page->frame->cnt_page -= 1;
+		if (page->frame->cnt_page == 0)
+		{
+			list_remove(&page->frame->frame_elem);
+			free(page->frame);
+		}
+		else
+			pml4_clear_page(page->pml4, page->va);
+	}
 }
