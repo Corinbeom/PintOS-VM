@@ -1,16 +1,19 @@
-/* anon.c: 디스크 이미지가 아닌 페이지(즉, 익명 페이지)를 위한 구현입니다. */
+/* anon.c: Implementation of page for non-disk image (a.k.a. anonymous page). */
 
 #include "vm/vm.h"
-#include "devices/disk.h"
 #include "threads/vaddr.h"
+#include "devices/disk.h"
 
-/* 이 아래 줄은 수정하지 마세요 */
+/* DO NOT MODIFY BELOW LINE */
 static struct disk *swap_disk;
-static bool anon_swap_in (struct page *page, void *kva);
-static bool anon_swap_out (struct page *page);
-static void anon_destroy (struct page *page);
+static struct list swap_slot_list;
+static struct lock swap_lock;
+static char *zero_set[PGSIZE];
+static bool anon_swap_in(struct page *page, void *kva);
+static bool anon_swap_out(struct page *page);
+static void anon_destroy(struct page *page);
 
-/* 이 구조체는 수정하지 마세요 */
+/* DO NOT MODIFY this struct */
 static const struct page_operations anon_ops = {
 	.swap_in = anon_swap_in,
 	.swap_out = anon_swap_out,
@@ -18,42 +21,91 @@ static const struct page_operations anon_ops = {
 	.type = VM_ANON,
 };
 
-/* 익명 페이지에 필요한 데이터를 초기화합니다. */
-void
-vm_anon_init (void) {
-	/* TODO: swap_disk를 설정하세요. */
-	swap_disk = disk_get(1, 0);
+/* Initialize the data for anonymous pages */
+void vm_anon_init(void)
+{
+	/* TODO: Set up the swap_disk. */
+	swap_disk = disk_get(1, 1);
+	list_init(&swap_slot_list);
+	lock_init(&swap_lock);
+	for (int i = 0; i < disk_size(swap_disk); i += SLOT_SIZE)
+	{
+		struct swap_slot *slot = malloc(sizeof(struct swap_slot));
+		list_init(&slot->page_list);
+		slot->start_sector = i;
+		list_push_back(&swap_slot_list, &slot->slot_elem);
+	}
+	memset(zero_set, 0, PGSIZE);
 }
 
-/* 익명 페이지 매핑을 초기화합니다. */
-bool
-anon_initializer (struct page *page, enum vm_type type, void *kva) {
-	/* 핸들러를 설정합니다. */
+/* Initialize the file mapping */
+bool anon_initializer(struct page *page, enum vm_type type, void *kva)
+{
+	/* Set up the handler */
 	page->operations = &anon_ops;
 
 	struct anon_page *anon_page = &page->anon;
+	page->pml4 = thread_current()->pml4;
+	anon_page->slot = NULL;
+	list_push_back(&page->frame->page_list, &page->out_elem);
+	return true;
 }
 
-/* 스왑 디스크에서 내용을 읽어와 페이지를 메모리에 로드합니다. */
+/* Swap in the page by read contents from the swap disk. */
 static bool
-anon_swap_in (struct page *page, void *kva) {
+anon_swap_in(struct page *page, void *kva)
+{
 	struct anon_page *anon_page = &page->anon;
-
-	// 우리가 swap-out 하지 않은 페이지는 memset으로 초기화하면 됨.
-	// 만약 anon_page->swap_slot != -1 이라면, 디스크에서 불러와야 함.
-	memset(kva, 0, PGSIZE);  // 초기 테스트를 위해 0으로 초기화
-
-	return true;  // 반드시 true 반환
+	struct list *page_list = &anon_page->slot->page_list;
+	struct swap_slot *slot = anon_page->slot;
+	int read = 0;
+	while (!list_empty(page_list))
+	{
+		struct page *in_page = list_entry(list_pop_front(page_list), struct page, out_elem);
+		pml4_set_page(in_page->pml4, in_page->va, page->frame->kva, in_page->writable);
+		if (read++ == 0)
+		{
+			for (int i = 0; i < SLOT_SIZE; i++)
+			{
+				disk_read(swap_disk, in_page->anon.slot->start_sector + i, in_page->va + DISK_SECTOR_SIZE * i);
+				disk_write(swap_disk, in_page->anon.slot->start_sector + i, zero_set + DISK_SECTOR_SIZE * i);
+			}
+		}
+		in_page->frame = page->frame;
+		page->frame->cnt_page += 1;
+		list_push_back(&page->frame->page_list, &in_page->out_elem);
+	}
+	list_push_back(&swap_slot_list, &slot->slot_elem);
+	return true;
 }
 
-/* 페이지 내용을 스왑 디스크에 저장하여 스왑 아웃합니다. */
+/* Swap out the page by writing contents to the swap disk. */
 static bool
-anon_swap_out (struct page *page) {
+anon_swap_out(struct page *page)
+{
 	struct anon_page *anon_page = &page->anon;
+	anon_page->slot = list_entry(list_pop_front(&swap_slot_list), struct swap_slot, slot_elem);
+	struct frame *frame = page->frame;
+	int dirty = 0;
+	while (!list_empty(&frame->page_list))
+	{
+		struct page *out_page = list_entry(list_pop_front(&frame->page_list), struct page, out_elem);
+		frame->cnt_page -= 1;
+		list_push_back(&anon_page->slot->page_list, &out_page->out_elem);
+		out_page->anon.slot = anon_page->slot;
+		for (int i = 0; i < SLOT_SIZE; i++)
+		{
+			disk_write(swap_disk, out_page->anon.slot->start_sector + i, out_page->va + DISK_SECTOR_SIZE * i);
+		}
+		pml4_clear_page(out_page->pml4, out_page->va);
+	}
+	return true;
 }
 
-/* 익명 페이지를 제거합니다. PAGE는 호출자에 의해 해제됩니다. */
+/* Destroy the anonymous page. PAGE will be freed by the caller. */
 static void
-anon_destroy (struct page *page) {
+anon_destroy(struct page *page)
+{
 	struct anon_page *anon_page = &page->anon;
+	page->frame->cnt_page -= 1;
 }
