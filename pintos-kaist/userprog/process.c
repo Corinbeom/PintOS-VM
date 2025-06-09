@@ -814,29 +814,48 @@ install_page(void *upage, void *kpage, bool writable)
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
 
+/* 파일의 내용을 실제 물리 메모리에 로딩하는 lazy loading 함수
+ *
+ * [동작 시점]
+ * - 유저가 해당 페이지에 처음 접근해 페이지 폴트가 발생했을 때 호출됨
+ * - 해당 유저 주소(VA)는 이미 page->va에 저장되어 있음
+ *
+ * [역할]
+ * - 파일의 특정 오프셋에서 read_bytes 만큼 읽고
+ * - 나머지 영역을 0으로 채운 뒤
+ * - 해당 물리 페이지(kva)에 이를 기록
+ *
+ * @param page   해당 유저 가상 주소에 대응되는 페이지 구조체
+ * @param aux_   load_segment()에서 전달한 보조 정보 (struct load*)
+ * @return       true on success, false on read failure
+ */
 static bool
 lazy_load_segment(struct page *page, void *aux_)
 {
-	/* TODO: Load the segment from the file */
-	/* TODO: This called when the first page fault occurs on address VA. */
-	/* TODO: VA is available when calling this function. */
+	// load_segment()에서 넘겨준 파일 로딩 정보 추출
 	struct load *aux = (struct load *)aux_;
-	struct file *file = aux->file;
-	off_t ofs = aux->ofs;
-	uint32_t read_bytes = aux->read_bytes;
-	uint32_t zero_bytes = aux->zero_bytes;
+	struct file *file = aux->file;             // 대상 파일
+	off_t ofs = aux->ofs;                      // 읽기 시작할 파일 오프셋
+	uint32_t read_bytes = aux->read_bytes;     // 읽을 데이터 크기
+	uint32_t zero_bytes = aux->zero_bytes;     // 0으로 채울 크기
+
+	// aux는 여기에서만 쓰이므로 정보 전달 후 즉시 free
 	free(aux);
+
+	// 파일 시스템 락을 획득한 뒤 file_read 수행
 	bool is_lock_held = lock_held_by_current_thread(&filesys_lock);
 	if (!is_lock_held)
 		lock_acquire(&filesys_lock);
 	file_seek(file, ofs);
 	if (file_read(file, page->frame->kva, read_bytes) != (int)read_bytes)
 	{
-		// error handle
+		// 파일 읽기 실패 시 실패 처리 (페이지 fault 처리 실패)
 		return false;
 	}
 	if (!is_lock_held)
 		lock_release(&filesys_lock);
+
+	// 읽고 남은 공간은 0으로 초기화
 	memset(page->frame->kva + read_bytes, 0, zero_bytes);
 	return true;
 }
@@ -865,24 +884,25 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
 
 	while (read_bytes > 0 || zero_bytes > 0)
 	{
-		/* Do calculate how to fill this page.
-		 * We will read PAGE_READ_BYTES bytes from FILE
-		 * and zero the final PAGE_ZERO_BYTES bytes. */
+		
+		// read_bytes + zero_bytes는 정확히 페이지 단위로 나누어 떨어져야 하며
+		// upage, ofs 모두 페이지 단위로 정렬되어 있어야 함.
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-		/* TODO: Set up aux to pass information to the lazy_load_segment. */
 		struct load *aux = malloc(sizeof(struct load));
-		aux->file = file;
-		aux->ofs = ofs;
-		aux->read_bytes = page_read_bytes;
-		aux->zero_bytes = page_zero_bytes;
+		aux->file = file;                    // 참조할 파일
+		aux->ofs = ofs;                      // 이 페이지가 읽을 파일 오프셋
+		aux->read_bytes = page_read_bytes;  // 이 페이지에서 읽을 바이트 수
+		aux->zero_bytes = page_zero_bytes;  // 나머지 zero-fill 바이트 수
 
+		/* lazy loading용 anonymous 페이지 할당.
+		 * 실제 데이터 로딩은 lazy_load_segment가 페이지 폴트 시 수행 */
 		if (!vm_alloc_page_with_initializer(VM_ANON, upage,
 											writable, lazy_load_segment, aux))
-			return false;
+			return false;  // 할당 실패 시 중단
 
-		/* Advance. */
+		/* 다음 페이지로 이동 */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
@@ -892,20 +912,36 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
 }
 
 /* Create a PAGE of stack at the USER_STACK. Return true on success. */
+/* 사용자 프로그램의 유저 스택을 초기화하는 함수
+ *
+ * [역할]
+ * - USER_STACK 주소에서 한 페이지 아래(stack_bottom)에 anonymous 페이지를 할당
+ * - 해당 페이지를 즉시 claim하여 물리 메모리에 연결
+ * - intr_frame의 rsp 레지스터를 USER_STACK 위치로 설정
+ *
+ * [주의]
+ * - lazy loading이 아닌 즉시 claim 필요 (stack은 첫 접근이 바로 일어나기 때문)
+ *
+ * @param if_ 사용자 프로세스의 초기 intr_frame (rsp 설정용)
+ * @return true on success, false on failure
+ */
 static bool
 setup_stack(struct intr_frame *if_)
 {
 	bool success = false;
+
+	// 유저 스택의 가장 마지막 주소(최하단) = USER_STACK - PGSIZE
+	// USER_STACK은 일반적으로 0x47400000 등으로 설정됨
 	void *stack_bottom = (void *)(((uint8_t *)USER_STACK) - PGSIZE);
 
-	/* TODO: Map the stack on stack_bottom and claim the page immediately.
-	 * TODO: If success, set the rsp accordingly.
-	 * TODO: You should mark the page is stack. */
-	/* TODO: Your code goes here */
+	/* anonymous 페이지를 스택 하단에 할당 (즉시 사용 예정이므로 lazy X) */
 	if (!vm_alloc_page_with_initializer(VM_ANON, stack_bottom, 1, NULL, NULL))
 		return false;
+
+	/* 즉시 페이지를 확보 (lazy loading이 아니라 바로 물리 프레임 할당) */
 	vm_claim_page(stack_bottom);
 
+	/* 스택 포인터를 USER_STACK (스택의 최상단)으로 설정 */
 	if_->rsp = USER_STACK;
 	success = true;
 
